@@ -414,8 +414,13 @@ html.js.motore-ko #nomotore{display:block}
   function sotto(v, soglia) { return soglia !== null && v < soglia; }
   function almeno(v, soglia) { return soglia !== null && v >= soglia; }
 
+  /* Differenze arrotondate al millesimo: 8,2 − 2,2 deve fare 6, non
+     5,999999… (in virgola mobile un bordo esatto cadeva dal lato sbagliato). */
+  function dif(a, b) { return Math.round((b - a) * 1000) / 1000; }
+
   /* L'algoritmo della Fig. 6 (p. 3741) con le soglie della Tab. S4.
-     Rende { p: 0/1/2 o null, perche, attesa, note[] }. */
+     Rende { p: 0/1/2 o null, perche, attesa, note[] } e, dopo un rule-out,
+     ritirato / dubbio / manca / regge3 (vedi ritiro). */
   function algoritmo(s) {
     var r = { p: null, perche: "", attesa: "", note: [], delta: null };
     if (!s.gate) { r.attesa = "conferma il passo 1"; return r; }
@@ -428,20 +433,24 @@ html.js.motore-ko #nomotore{display:block}
     var vl = t[0], lo = t[1], nod = t[2], hi = t[3], d = t[4];
 
     if (almeno(s.c0, hi)) { r.p = 2; r.perche = "0 h ≥ " + hi + " ng/L: valore iniziale alto"; return r; }
+    /* il Δ del secondo prelievo prima del valore molto basso: anche sopra un
+       0 h molto basso, un aumento ≥ Δ e' rule-in (Fig. 6, p. 3741) */
+    if (s.c1 !== null && d !== null && dif(s.c0, s.c1) >= d) {
+      r.delta = dif(s.c0, s.c1); r.p = 2; r.perche = "aumento di " + fmt(r.delta) + " ng/L in " + s.alg + " h (≥ " + d + ")"; return r;
+    }
     if (sotto(s.c0, vl) && s.esordio === "oltre") {
-      r.p = 0; r.perche = "0 h < " + vl + " ng/L e dolore da più di 3 h: valore iniziale molto basso"; return r;
+      r.p = 0; r.molto = true; r.perche = "0 h < " + vl + " ng/L e dolore da più di 3 h: valore iniziale molto basso"; return ritiro(s, r, t);
     }
     if (sotto(s.c0, vl)) r.note.push("molto basso ma esordio " + (s.esordio === "entro" ? "da 3 h o meno" : "non noto") + ": il rule-out a un solo prelievo vale solo col dolore da più di 3 h");
     if (s.c1 === null) { r.attesa = "serve il prelievo a " + s.alg + " h"; return r; }
 
-    r.delta = s.c1 - s.c0;
+    r.delta = dif(s.c0, s.c1);
     if (lo === null || nod === null || d === null) {
       r.attesa = "soglie «basso», «nessun Δ» e «Δ» da definire (TBD) per questo saggio a 0 h/2 h";
       return r;
     }
-    if (r.delta >= d) { r.p = 2; r.perche = "aumento di " + fmt(r.delta) + " ng/L in " + s.alg + " h (≥ " + d + ")"; return r; }
     if (sotto(s.c0, lo) && Math.abs(r.delta) < nod) {
-      r.p = 0; r.perche = "0 h < " + lo + " ng/L e variazione " + fmt(r.delta) + " ng/L (< " + nod + "): basso, senza Δ"; return r;
+      r.p = 0; r.perche = "0 h < " + lo + " ng/L e variazione " + fmt(r.delta) + " ng/L (< " + nod + "): basso, senza Δ"; return ritiro(s, r, t);
     }
     r.p = 1;
     if (r.delta <= -d) {
@@ -455,16 +464,51 @@ html.js.motore-ko #nomotore{display:block}
     return r;
   }
 
+  /* Dopo un rule-out i prelievi successivi lo devono reggere: incrementi
+     tardivi nell'1% (S p. 12, avvertenza iv). Lettura dello strumento,
+     25/10/2026. Il rule-out non regge se un valore attraversa il 99°
+     percentile per sesso — il prelievo a 1 h o 2 h dopo il «molto basso»,
+     che l'algoritmo non legge, o quello a 3 h — o se a 3 h, gia' sopra
+     l'URL, sale di almeno il Δ del saggio. Regge a 3 h con i criteri della
+     hs-cTnT (<15 ng/L e variazione 0/3 h <4, S p. 12) o, per gli hs-cTnI,
+     sotto l'URL e con una salita 0/3 h sotto il Δ. Altrimenti va
+     rivalutato: un aumento rilevante fra 0 e 3 h indica un sospetto alto
+     (p. 3740). */
+  function ritiro(s, r, t) {
+    var c1molto = r.molto && s.c1 !== null;
+    if (!c1molto && s.c3 === null) return r;
+    if (!s.sesso || s.url === null) { r.manca = true; return r; }
+    var u = s.url, d = t[4];
+    if (c1molto && s.c1 > u) { r.ritirato = "a " + s.alg + " h " + fmt(s.c1) + " ng/L, sopra il 99° percentile (" + fmt(u) + ")"; return r; }
+    if (s.c3 === null) return r;
+    var prima = s.c1 === null ? s.c0 : Math.max(s.c0, s.c1), d3 = dif(s.c0, s.c3);
+    if (s.c3 > u && (prima <= u || (d !== null && d3 >= d))) {
+      r.ritirato = "a 3 h " + fmt(s.c3) + " ng/L, sopra il 99° percentile (" + fmt(u) + ")" + (prima <= u ? "" : ", salito di " + fmt(d3) + " ng/L");
+      return r;
+    }
+    var regge = s.saggio === "elecsys" ? (s.c3 < OSS_T.c3 && Math.abs(d3) < OSS_T.d) : (s.c3 <= u && (d === null || d3 < d));
+    if (regge) r.regge3 = true;
+    else r.dubbio = "a 3 h " + fmt(s.c3) + " ng/L, variazione 0/3 h " + (d3 > 0 ? "+" : "") + fmt(d3) + " ng/L" + (s.saggio === "elecsys" ? " (servono <15 e <4)" : " (sopra l'URL o salita ≥ " + d + ")");
+    return r;
+  }
+
   /* Zona di osservazione con il prelievo a 3 h. */
   function osservazione(s) {
     if (s.c3 === null) return { esito: null };
     if (s.saggio !== "elecsys") return { esito: "nd" };
-    var d3 = Math.abs(s.c3 - s.c0);
+    var d3 = Math.abs(dif(s.c0, s.c3));
     return { esito: (s.c3 < OSS_T.c3 && d3 < OSS_T.d) ? "ok" : "no", d3: d3 };
   }
 
-  /* La definizione: danno acuto (Box 1) contro cronico (Box 2, p. 9). */
-  function udmi(s, a) {
+  /* La definizione: danno acuto (Box 1, p. 8) contro cronico (Box 2, p. 8;
+     p. 9). In acuto la priorita' e' escludere il danno acuto con il
+     percorso validato (p. 9): «nessun valore sopra» si da' in verde solo dopo
+     un rule-out che regge, con i criteri a 3 h soddisfatti, o con 0 h e 3 h
+     entrambi sotto l'URL (percorso convenzionale, p. 27); «cronico» mai con
+     un rule-in, un rule-out che non regge, un'osservazione aperta o un
+     algoritmo ancora senza esito, e mai su due soli prelievi ravvicinati
+     senza un rule-out (lettura dello strumento, 25/10/2026). */
+  function udmi(s, a, o) {
     var vals = [s.c0, s.c1, s.c3];
     var n = 0, sopra = 0, max = null;
     for (var i = 0; i < vals.length; i++) {
@@ -472,23 +516,46 @@ html.js.motore-ko #nomotore{display:block}
       n++; if (max === null || vals[i] > max) max = vals[i];
       if (s.url !== null && vals[i] > s.url) sopra++;
     }
-    var r = { k: null, testo: "", note: [] };
+    var r = { k: null, testo: "", note: [], stato: "", blocco: "", dolore: false, rel: null };
     if (!s.sesso || s.url === null) { r.testo = "servono sesso e 99° percentile"; return r; }
     if (n === 0) { r.testo = "nessun valore"; return r; }
+    var serie3 = s.c0 !== null && s.c3 !== null, dolore = s.f2 || s.f3;
+    var ossOk = a.p === 1 && o && o.esito === "ok";
+    var ossAperta = a.p === 1 && !ossOk;
+    var senzaEsito = a.p === null && s.gate && s.saggio && s.saggio !== "altro" && s.alg && S4[s.alg] && S4[s.alg][s.saggio];
     if (sopra === 0) {
-      r.k = 0; r.testo = "nessun valore sopra il 99° percentile";
+      r.testo = "nessun valore sopra il 99° percentile";
+      if (a.p === 2) { r.k = 9; r.stato = "smista"; r.testo = "nessun valore ancora sopra il 99° percentile: serve il prelievo successivo"; }
+      else if (a.dubbio) { r.k = 9; r.stato = "dubbio"; r.testo = "nessun valore sopra il 99° percentile, ma a 3 h la variazione è rilevante"; }
+      else if (a.p === 1 && o && o.esito === "no") { r.k = 9; r.stato = "oss"; r.testo = "nessun valore sopra il 99° percentile, ma i criteri a 3 h non sono soddisfatti"; }
+      else if (a.p === 0 || ossOk || serie3) {
+        if (dolore && !serie3) { r.k = 9; r.stato = "serie"; r.testo = "nessun valore sopra il 99° percentile, ma la serie non basta ancora"; }
+        else { r.k = 0; r.stato = ossOk ? "ossok" : (a.p === 0 ? "ruleout" : "convenzionale"); r.dolore = dolore; }
+      } else { r.k = 9; r.stato = "finora"; r.testo = "nessun valore sopra il 99° percentile, finora: serve il prelievo successivo"; }
       if (n === 1) r.note.push("un solo valore");
       return r;
     }
     if (n < 2) { r.k = 9; r.testo = "sopra il 99° percentile: serve la serie"; return r; }
     /* segnale di rise and/or fall: il Δ validato del saggio, se c'e' */
     var t = (s.saggio && s.alg && S4[s.alg] && S4[s.alg][s.saggio]) ? S4[s.alg][s.saggio] : null;
-    var dmax = Math.abs((s.c1 !== null ? s.c1 : s.c3) - s.c0);
-    var rel = s.c0 > 0 ? dmax / s.c0 : null;
-    var dinamica = (t && t[4] !== null && s.c1 !== null) ? Math.abs(s.c1 - s.c0) >= t[4] : null;
+    var dinamica = (t && t[4] !== null && s.c0 !== null && s.c1 !== null) ? Math.abs(dif(s.c0, s.c1)) >= t[4] : null;
     if (dinamica === true) { r.k = 2; r.testo = "danno miocardico acuto"; r.note.push("dinamica"); return r; }
-    if (sopra >= 2 && rel !== null && rel < 0.2) {
-      r.k = 1; r.testo = s.stabile ? "compatibile con danno cronico" : "elevata e stabile: acuto o cronico?";
+    /* la variazione relativa fra tutte le coppie di prelievi, sul primo dei
+       due: «fra le misure», UDMI5 p. 9. Da zero a un valore positivo e'
+       una variazione infinita. */
+    var cp = [[s.c0, s.c1], [s.c0, s.c3], [s.c1, s.c3]], rel = null;
+    for (var j = 0; j < cp.length; j++) {
+      var p0 = cp[j][0], p1 = cp[j][1], x;
+      if (p0 === null || p1 === null) continue;
+      if (p0 <= 0) x = p1 > 0 ? Infinity : 0;
+      else x = Math.round((p1 - p0) / p0 * 10000) / 10000;
+      if (rel === null || Math.abs(x) > Math.abs(rel)) rel = x;
+    }
+    r.rel = rel;
+    if (sopra >= 2 && rel !== null && Math.abs(rel) < 0.2) {
+      r.k = 1;
+      r.blocco = a.p === 2 ? "rule-in" : (a.ritirato ? "ritirato" : (a.dubbio ? "dubbio" : (ossAperta ? "osservazione" : (senzaEsito ? "senzaesito" : ((serie3 || a.p === 0) ? "" : "corto")))));
+      r.testo = (s.stabile && !r.blocco) ? "compatibile con danno cronico" : "elevata e stabile: acuto o cronico?";
       r.note.push("stabile");
       return r;
     }
@@ -575,17 +642,31 @@ html.js.motore-ko #nomotore{display:block}
       el("algVal").textContent = "—";
       chip("algCat", null, a.attesa || "—");
       el("algWhy").textContent = "";
+    } else if (a.ritirato) {
+      el("algVal").textContent = "rule-out ritirato";
+      chip("algCat", 2, "il rule-out non regge");
+      el("algWhy").textContent = a.perche + "; poi " + a.ritirato;
+    } else if (a.p === 0 && (a.dubbio || a.manca)) {
+      el("algVal").textContent = a.dubbio ? "rule-out da rivalutare" : "rule-out da confermare";
+      chip("algCat", 9, a.dubbio ? "il prelievo a 3 h chiede di rivalutare" : "servono sesso e 99° percentile");
+      el("algWhy").textContent = a.perche + "; poi " + (a.dubbio || "c'è un prelievo successivo da leggere contro il 99° percentile, al passo 5");
     } else {
       el("algVal").textContent = PERCORSO[a.p];
       chip("algCat", a.p, "percorso " + PERCORSO[a.p]);
       el("algWhy").textContent = a.perche;
     }
     for (var i = 0; i < a.note.length; i++) {
-      if (a.note[i] === "discesa") an += nota("", "<strong>La troponina scende di quanto basterebbe per un rule-in.</strong> La Fig. 6 parla di <em>aumento</em>; una discesa di pari entità è comunque un «fall», che nella definizione conta come la salita. Non consente il rule-out: qui è trattata come <strong>osservazione</strong>, da giudicare con la clinica." + pg("Fig. 6, p. 3741 · UDMI5 p. 8"));
+      if (a.note[i] === "discesa") an += nota("", "<strong>La troponina scende di quanto basterebbe per un rule-in.</strong> Il riquadro della Fig. 6 disegna un aumento, ma la legenda e il testo parlano di <em>variazione</em> a 1 h o 2 h; una discesa di pari entità è comunque un «fall», che nella definizione conta come la salita. Non consente il rule-out: qui è trattata come <strong>osservazione</strong>, da giudicare con la clinica." + pg("Fig. 6, p. 3741 · p. 3740 · UDMI5 p. 8"));
       else an += nota("info", a.note[i].charAt(0).toUpperCase() + a.note[i].slice(1) + "." + pg("S p. 12"));
     }
 
-    if (a.p === 0) {
+    if (a.p === 0 && a.ritirato) {
+      an += nota("stop", "<strong>Il rule-out non regge:</strong> " + a.ritirato + ". Incrementi tardivi si vedono in circa l'1% dei pazienti: niente dimissione su questo esito, e la curva si legge con la definizione, al passo 5. La soglia del 99° percentile per ritirare il rule-out è una lettura dello strumento." + pg("S p. 12, avvertenza iv · Fig. 6, p. 3741"));
+    } else if (a.p === 0 && a.dubbio) {
+      an += nota("stop", "<strong>Il rule-out va rivalutato:</strong> " + a.dubbio + ". Un aumento rilevante fra 0 e 3 h indica un sospetto alto: niente dimissione su questo esito. Dove regge e dove no è una lettura dello strumento." + pg("p. 3740 · S p. 12"));
+    } else if (a.p === 0 && a.manca) {
+      an += nota("", "<strong>Rule-out da confermare:</strong> c'è un prelievo successivo, e per sapere se il rule-out regge va letto contro il 99° percentile per sesso. Indica sesso e 99° percentile al passo 5." + pg("S p. 12, avvertenza iv"));
+    } else if (a.p === 0) {
       if (serie) {
         an += nota("stop", "<strong>Non fermarti al rule-out.</strong> Con dolore in corso o ricorrente, o con sospetto clinico che resta alto, i prelievi seriati <strong>proseguono</strong>: incrementi tardivi si osservano in circa l'1% dei pazienti, e con dolore ricorrente ripetere il prelievo è obbligatorio." + pg("S p. 12 · p. 3740"));
       }
@@ -611,8 +692,13 @@ html.js.motore-ko #nomotore{display:block}
 
     /* passo 4 */
     var o = osservazione(s), op = "";
-    if (a.p !== 1) {
-      op = '<p class="why">Serve quando il passo 3 dà <strong>osservazione</strong>.</p>';
+    if (a.p === 0 && (s.c3 !== null || a.ritirato || a.manca)) {
+      if (a.ritirato) op = nota("stop", "<strong>Dopo il rule-out, " + a.ritirato + ":</strong> il rule-out non regge (lettura dello strumento)." + pg("S p. 12, avvertenza iv"));
+      else if (a.manca) op = nota("", "Per leggere i prelievi successivi a un rule-out servono <strong>sesso e 99° percentile</strong>, al passo 5." + pg("S p. 12, avvertenza iv"));
+      else if (a.dubbio) op = nota("", "<strong>Dopo il rule-out, " + a.dubbio + ":</strong> un aumento rilevante fra 0 e 3 h indica un sospetto alto, e il rule-out va rivalutato (lettura dello strumento)." + pg("p. 3740 · S p. 12"));
+      else if (a.regge3) op = nota("info", "Dopo il rule-out, a 3 h " + fmt(s.c3) + " ng/L, variazione 0/3 h " + fmt(dif(s.c0, s.c3)) + ": il rule-out regge" + (s.saggio === "elecsys" ? " — sotto 15 e sotto 4, la combinazione validata della hs-cTnT." : ", sotto il 99° percentile e con una salita sotto il Δ del saggio (lettura dello strumento: per gli hs-cTnI i criteri a 3 h sono in sviluppo).") + pg("S p. 12"));
+    } else if (a.p !== 1) {
+      op = '<p class="why">Serve quando il passo 3 dà <strong>osservazione</strong>; dopo un rule-out, controlla che il rule-out regga.</p>';
     } else if (o.esito === null) {
       op = '<p class="why">Inserisci il valore a 3 h.</p>';
     } else if (o.esito === "nd") {
@@ -632,16 +718,30 @@ html.js.motore-ko #nomotore{display:block}
     } else if (s.saggio === "triage") {
       un.textContent = "IFCC: non disponibile — DA VERIFICARE col laboratorio";
     } else un.textContent = "";
-    var u = udmi(s, a), unote = "";
+    var u = udmi(s, a, o), unote = "";
     chip("udmiCat", u.k, u.testo);
     if (u.k === 2) unote += nota("stop", "<strong>Rise and/or fall con almeno un valore sopra il 99° percentile</strong>: è la definizione di danno miocardico acuto. Il segnale di dinamica qui è il Δ validato del saggio; la definizione non fissa un valore unico, e decide il giudizio clinico." + pg("UDMI5 Box 1, p. 8 · p. 26"));
-    if (u.k === 2 || u.k === 9) unote += nota("info", "<strong>Danno acuto non vuol dire infarto.</strong> Serve almeno un criterio clinico o ECG — sintomi di ischemia, alterazioni ischemiche nuove, onde Q patologiche — e la conferma con l'imaging coronarico o cardiaco." + pg("UDMI5 Box 3, p. 10"));
+    if (u.k === 2 || (u.k === 9 && !u.stato)) unote += nota("info", "<strong>Danno acuto non vuol dire infarto.</strong> Serve almeno un criterio clinico o ECG — sintomi di ischemia, alterazioni ischemiche nuove, onde Q patologiche — e la conferma con l'imaging coronarico o cardiaco." + pg("UDMI5 Box 3, p. 10"));
+    if (u.stato === "smista") unote += nota("", "<strong>Smistare non è definire.</strong> Il rule-in ha un valore predittivo positivo del 70–75%; il danno miocardico chiede almeno un valore sopra il 99° percentile <strong>per sesso</strong>. Serve il prelievo successivo." + pg("p. 3740 · UDMI5 p. 27"));
+    if (u.stato === "dubbio") unote += nota("", "Nessun valore sopra l'URL, ma dopo il rule-out la variazione fra 0 e 3 h è rilevante: il sospetto resta." + pg("p. 3740"));
+    if (u.stato === "oss") unote += nota("", "Nessun valore sopra l'URL, ma a 3 h i criteri della zona di osservazione non sono soddisfatti: il sospetto resta, e la valutazione del rischio è individuale." + pg("S p. 12 · p. 3740"));
+    if (u.stato === "finora") unote += nota("", "Un valore sotto il 99° percentile non basta: alla presentazione la sua sensibilità è di circa il 90%, e scende fino al 70% entro 3 h dall'esordio. Serve il rule-out dell'algoritmo, o il prelievo a 3 h." + pg("UDMI5 pp. 25, 27 · Box 6"));
+    if (u.stato === "serie") unote += nota("stop", "<strong>Dolore in corso o ricorrente, o sospetto che resta alto:</strong> prima di escludere l'infarto servono i prelievi seriati, fino al prelievo a 3 h." + pg("UDMI5 Box 6, p. 27 · S p. 12"));
+    if (u.stato === "convenzionale") unote += nota("info", "Nessun valore sopra l'URL a 0 e a 3 h: è la logica del <strong>percorso convenzionale</strong>, insieme a uno score di rischio clinico." + pg("UDMI5 p. 27"));
+    if (u.dolore) unote += nota("info", "Con dolore che recidiva o sospetto che resta alto, una <strong>nuova troponina</strong> anche dopo questa serie." + pg("S p. 12, avvertenza iv"));
     if (u.k === 1) {
-      unote += nota("", "Variazione <strong>&lt;20%</strong> fra le misure: il danno è più probabilmente <strong>cronico e stabile</strong> che progressivo. È un criterio <strong>analitico</strong>, basato solo sull'imprecisione del saggio." + pg("UDMI5 p. 9"));
+      unote += nota("", "Variazione <strong>&lt;20%</strong> fra le misure, su tutte le coppie di prelievi: il danno è più probabilmente <strong>cronico e stabile</strong> che progressivo. È un criterio <strong>analitico</strong>, basato solo sull'imprecisione del saggio." + pg("UDMI5 p. 9"));
+      var perche = { "rule-in": "finché l'algoritmo dice rule-in:</strong> il rule-in chiede di norma ricovero e coronarografia.",
+                     "osservazione": "finché l'algoritmo dice osservazione:</strong> l'osservazione ha una mortalità paragonabile al rule-in, e per la hs-cTnT si chiude solo con i criteri a 3 h.",
+                     "ritirato": "con un rule-out che non regge:</strong> in acuto il danno acuto va escluso prima.",
+                     "dubbio": "con un rule-out da rivalutare:</strong> in acuto il danno acuto va escluso prima.",
+                     "senzaesito": "finché l'algoritmo non ha un esito:</strong> manca il secondo prelievo, o le soglie non sono definite per questo saggio." }[u.blocco];
+      if (perche) unote += nota("stop", "<strong>Non è «cronico» " + perche + pg("p. 3740 · UDMI5 p. 9"));
+      if (u.blocco === "corto") unote += nota("", "Con due soli prelievi ravvicinati il danno acuto si distingue male dal cronico, e in acuto la priorità è escluderlo con il percorso validato: il cronico si considera dopo un rule-out o con il prelievo a 3 h (lettura dello strumento)." + pg("UDMI5 p. 9"));
       unote += nota("info", "Il danno cronico si <strong>considera</strong> con due o più valori sopra il 99° percentile in situazione clinica stabile; si <strong>conferma</strong> con una condizione cardiaca o non cardiaca che rimodella il cuore; si <strong>esclude</strong> se l'aumento è spiegato da interferenza analitica o ridotta clearance." + pg("UDMI5 Box 2, p. 8"));
       if (!s.stabile) unote += nota("stop", "<strong>Paziente non stabile:</strong> in acuto la priorità è escludere danno acuto o infarto con il percorso accelerato; valori stabili possono anche essere il picco o la coda di un infarto recente." + pg("UDMI5 pp. 9, 27"));
     }
-    if (u.k === 0 && s.esordio !== "oltre") unote += nota("", "Presentazione precoce: l'aumento può non vedersi <strong>nemmeno con i saggi ad alta sensibilità</strong>, e servono prelievi seriati." + pg("UDMI5 Box 6, p. 27"));
+    if ((u.k === 0 || u.stato === "finora") && s.esordio !== "oltre") unote += nota("", "Presentazione precoce: l'aumento può non vedersi <strong>nemmeno con i saggi ad alta sensibilità</strong>, e servono prelievi seriati." + pg("UDMI5 Box 6, p. 27"));
     if (u.k !== null && u.k !== 0 && s.c0 !== null && s.url !== null && s.c0 > 0) {
       var alto = Math.max(s.c0, s.c1 === null ? 0 : s.c1, s.c3 === null ? 0 : s.c3);
       if (alto >= 5 * s.url) unote += nota("info", "Valore molto alto (" + fmt(alto / s.url) + "× il 99° percentile): valori molto alti si vedono raramente nel danno cronico, e la dimostrazione del rise and/or fall può non servire." + pg("UDMI5 p. 27"));
@@ -662,7 +762,7 @@ html.js.motore-ko #nomotore{display:block}
     el("limiti").innerHTML = "<li>" + lim.join("</li><li>") + "</li>";
 
     /* barra */
-    if (a.p === null) chip("barAlg", null, "—"); else chip("barAlg", a.p, PERCORSO[a.p]);
+    if (a.p === null) chip("barAlg", null, "—"); else if (a.ritirato) chip("barAlg", 2, "rule-out ritirato"); else if (a.p === 0 && (a.dubbio || a.manca)) chip("barAlg", 9, a.dubbio ? "rule-out da rivalutare" : "rule-out da confermare"); else chip("barAlg", a.p, PERCORSO[a.p]);
     if (u.k === null) chip("barUdmi", null, "—"); else chip("barUdmi", u.k, u.testo);
   }
 
